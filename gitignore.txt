@@ -1,0 +1,7 @@
+bin/
+obj/
+*.user
+
+# Don't commit your real catalog (may contain private share links/codes) or secrets.
+firmware_catalog.json
+.env
