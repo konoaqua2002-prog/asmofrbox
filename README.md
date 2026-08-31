@@ -59,6 +59,7 @@ share links/extraction codes — it's already in `.gitignore`.
 ### 3. Run it
 
 ```bash
+export ADMIN_TELEGRAM_CHAT_IDS=Telegram_id1,Telegram_id2
 export TELEGRAM_BOT_TOKEN=123456:ABC-your-token-here
 # optional:
 export CATALOG_SOURCE=/path/to/firmware_catalog.json   # or an https:// URL
