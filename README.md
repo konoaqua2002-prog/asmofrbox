@@ -39,12 +39,45 @@ Aliyun PDS), which is unavoidable since that's where the files live.
 Talk to [@BotFather](https://t.me/BotFather) on Telegram, run `/newbot`,
 follow the prompts, and copy the token it gives you.
 
-### 2. Provide a firmware catalog
+### 2. Configure the bot (config.json or environment variables)
+
+You can put secrets in a `config.json` file next to the app instead of
+using `export`. Copy the sample and fill in your values:
+
+```bash
+cp config.sample.json config.json
+# then edit config.json
+```
+
+Example `config.json`:
+
+```json
+{
+  "TELEGRAM_BOT_TOKEN": "123456:ABC-your-token-from-BotFather",
+  "ADMIN_TELEGRAM_CHAT_IDS": "1959847621,5741258354",
+  "CATALOG_SOURCE": ""
+}
+```
+
+Supported keys:
+
+| Key | Description |
+|-----|-------------|
+| `TELEGRAM_BOT_TOKEN` | Required. Token from @BotFather. |
+| `ADMIN_TELEGRAM_CHAT_IDS` | Comma-separated numeric Telegram user/chat IDs that receive OTP requests (and can approve them). |
+| `ADMIN_TELEGRAM_USERNAMES` | Optional. Comma-separated @usernames (fallback if chat IDs aren't set). |
+| `CATALOG_SOURCE` | Optional. Path or `https://` URL to the firmware catalog. |
+
+Environment variables still work and **override** `config.json` when both
+are present (useful for Docker / systemd). `config.json` is already in
+`.gitignore` — never commit real tokens.
+
+### 3. Provide a firmware catalog
 
 Same three-tier scheme as the desktop app (`LocalCatalogService.cs`):
 
 1. `firmware_catalog.json` next to the running app (or wherever
-   `CATALOG_SOURCE` env var points), or
+   `CATALOG_SOURCE` points), or
 2. baked into the assembly at build time if `firmware_catalog.json` exists
    at the project root when you `dotnet publish`/`docker build`, or
 3. nothing — bot still starts, searches just return 0 results.
@@ -56,15 +89,20 @@ file.
 **Don't commit your real `firmware_catalog.json`** if it contains private
 share links/extraction codes — it's already in `.gitignore`.
 
-### 3. Run it
+### 4. Run it
 
 ```bash
-export ADMIN_TELEGRAM_CHAT_IDS=Telegram_id1,Telegram_id2
+# Option A — config.json (recommended for local runs)
+cp config.sample.json config.json
+# edit config.json with your token + admin chat IDs
+dotnet restore
+dotnet run
+
+# Option B — environment variables
 export TELEGRAM_BOT_TOKEN=123456:ABC-your-token-here
+export ADMIN_TELEGRAM_CHAT_IDS=1959847621,5741258354
 # optional:
 export CATALOG_SOURCE=/path/to/firmware_catalog.json   # or an https:// URL
-
-dotnet restore
 dotnet run
 ```
 
@@ -139,7 +177,7 @@ get a compile check for free.
 ## Project layout
 
 ```
-Program.cs                   entry point, config, polling loop
+Program.cs                   entry point, config.json + env loading, polling loop
 BotService.cs                all Telegram command/callback handling
 SearchSessionStore.cs        per-chat in-memory search state
 IFirmwareCatalog.cs          catalog abstraction (unchanged)
@@ -147,6 +185,7 @@ LocalCatalogService.cs       default catalog source (unchanged)
 Models.cs                    FirmwareEntry / ShareFile / SearchResult / SecureDownloadLink
 FrBoxService.cs               Transsion FRBox / Aliyun PDS client (unchanged)
 RemoteZipReader.cs            reads ZIP central directory over HTTP Range (unchanged)
+config.sample.json            sample secrets file (copy to config.json)
 firmware_catalog.sample.json  schema reference
 Dockerfile
 .github/workflows/build.yml
