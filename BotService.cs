@@ -79,17 +79,7 @@ public sealed class BotService
             {
                 case "/start":
                 case "/help":
-                    await TrySend(chatId,
-                        "👋 <b>Firmware Finder</b>\n\n" +
-                        "This bot requires OTP verification before any firmware or download link can be shown.\n\n" +
-                        "1️⃣ Tap <b>🔐 Request OTP</b> below (or send <code>/requestotp</code>) — request a 6-digit code\n" +
-                        "2️⃣ <code>/verify 123456</code> — verify it\n" +
-                        "3️⃣ Send a model name (e.g. <code>CN6</code> or <code>H616AF</code>) or use <code>/search &lt;model&gt;</code> — I'll search the firmware catalog\n" +
-                        "4️⃣ Tap a result to select a version\n" +
-                        "5️⃣ Review the full version name/details and confirm it's correct\n" +
-                        "6️⃣ I'll send you the download link\n\n" +
-                        "🔐 <i>Each OTP is good for one download. If you want a different model or version afterwards, you'll need to request and verify a new OTP.</i>",
-                        ct, ParseMode.Html, BuildRequestOtpKeyboard()).ConfigureAwait(false);
+                    await SendWelcomeInstructionsAsync(chatId, ct).ConfigureAwait(false);
                     return;
 
                 case "/requestotp":
@@ -106,11 +96,18 @@ public sealed class BotService
 
                     if (_sessions.TryVerifyOtp(chatId, arg))
                     {
-                        await TrySend(chatId, "✅ OTP verified. You can now search for firmware and access links.", ct, ParseMode.Html).ConfigureAwait(false);
+                        await TrySend(chatId,
+                            "✅ <b>OTP verified.</b>\n\n" +
+                            "You can now search for firmware.\n\n" +
+                            "➡️ Send a model name (e.g. <code>CN6</code> or <code>H616AF</code>)\n" +
+                            "or use <code>/search CN6</code>",
+                            ct, ParseMode.Html).ConfigureAwait(false);
                     }
                     else
                     {
-                        await TrySend(chatId, "❌ Invalid or expired OTP. Send <code>/requestotp</code> to generate a fresh code.", ct, ParseMode.Html).ConfigureAwait(false);
+                        await TrySend(chatId,
+                            "❌ Invalid or expired OTP.\n\nTap <b>🔐 Request OTP</b> below (or send <code>/requestotp</code>) to get a new code.",
+                            ct, ParseMode.Html, BuildRequestOtpKeyboard()).ConfigureAwait(false);
                     }
                     return;
 
@@ -138,24 +135,88 @@ public sealed class BotService
         await RunSearchAsync(chatId, text, page: 1, ct).ConfigureAwait(false);
     }
 
-    private async Task RequestOtpAsync(long chatId, CancellationToken ct)
+    /// <summary>
+    /// Full welcome / instructions shown on /start and /help.
+    /// Explains how to request OTP and how to request firmware step by step.
+    /// </summary>
+    private async Task SendWelcomeInstructionsAsync(long chatId, CancellationToken ct)
     {
-        var otp = _sessions.IssueOtp(chatId);
-        if (otp is null)
-        {
-            await TrySend(chatId, "⚠️ Could not generate OTP right now. Please try again in a moment.", ct, ParseMode.Html).ConfigureAwait(false);
-            return;
-        }
+        var text =
+            "👋 <b>Firmware Finder</b>\n\n" +
+            "This bot gives you official FRBox firmware share links after a short OTP check.\n\n" +
+            "━━━━━━━━━━━━━━━━━━━━\n" +
+            "<b>How to request firmware</b>\n\n" +
+            "1️⃣ Tap <b>🔐 Request OTP</b> below\n" +
+            "   (or send <code>/requestotp</code>)\n\n" +
+            "2️⃣ Wait — an administrator will send you a 6-digit code\n\n" +
+            "3️⃣ Verify it with:\n" +
+            "   <code>/verify 123456</code>\n\n" +
+            "4️⃣ Search for your model:\n" +
+            "   • Just type the model, e.g. <code>CN6</code>\n" +
+            "   • Or use <code>/search H616AF</code>\n\n" +
+            "5️⃣ Tap a result → review the details → confirm\n\n" +
+            "6️⃣ You’ll receive the download link + extraction code\n\n" +
+            "━━━━━━━━━━━━━━━━━━━━\n" +
+            "🔐 <i>Each OTP is valid for one download only. " +
+            "If you need another model or version afterwards, request a new OTP.</i>\n\n" +
+            "⏱ OTP expires after 5 minutes. There is a short cooldown between requests " +
+            "so the admin inbox stays readable when many people request at once.";
 
-        var requesterDisplayName = await GetRequesterDisplayNameAsync(chatId, ct).ConfigureAwait(false);
-        await NotifyAdminOfOtpAsync(chatId, requesterDisplayName, otp.Code, ct).ConfigureAwait(false);
-
-        await TrySend(chatId,
-            "🔐 Your verification request has been sent to the administrator. Please wait for confirmation before continuing.",
-            ct, ParseMode.Html).ConfigureAwait(false);
+        await TrySend(chatId, text, ct, ParseMode.Html, BuildRequestOtpKeyboard()).ConfigureAwait(false);
     }
 
-    private async Task NotifyAdminOfOtpAsync(long chatId, string requesterDisplayName, string otpCode, CancellationToken ct)
+    private async Task RequestOtpAsync(long chatId, CancellationToken ct)
+    {
+        var result = _sessions.IssueOtp(chatId);
+
+        switch (result.Status)
+        {
+            case SearchSessionStore.IssueOtpStatus.Cooldown:
+                await TrySend(chatId,
+                    $"⏳ Please wait <b>{result.CooldownSecondsRemaining}s</b> before requesting another OTP.\n\n" +
+                    "This limit keeps the admin inbox manageable when many users request at the same time.",
+                    ct, ParseMode.Html, BuildRequestOtpKeyboard()).ConfigureAwait(false);
+                return;
+
+            case SearchSessionStore.IssueOtpStatus.AlreadyPending:
+            {
+                var pending = result.Otp!;
+                var minsLeft = Math.Max(1, (int)Math.Ceiling((pending.ExpiresAtUtc - DateTimeOffset.UtcNow).TotalMinutes));
+                var statusNote = pending.DeliveredToClient
+                    ? "The code was already sent to you — check earlier messages, or use <code>/verify YOURCODE</code>."
+                    : "Your previous request is still pending. An admin has been notified; please wait a moment.";
+
+                await TrySend(chatId,
+                    $"🔐 You already have a pending OTP (request <code>#{Escape(pending.RequestId)}</code>).\n\n" +
+                    $"{statusNote}\n\n" +
+                    $"⏱ Expires in about {minsLeft} minute(s).",
+                    ct, ParseMode.Html).ConfigureAwait(false);
+                return;
+            }
+
+            case SearchSessionStore.IssueOtpStatus.Issued:
+            {
+                var otp = result.Otp!;
+                var requesterDisplayName = await GetRequesterDisplayNameAsync(chatId, ct).ConfigureAwait(false);
+                await NotifyAdminOfOtpAsync(chatId, requesterDisplayName, otp, ct).ConfigureAwait(false);
+
+                await TrySend(chatId,
+                    "🔐 <b>OTP request sent</b>\n\n" +
+                    $"Request ID: <code>#{Escape(otp.RequestId)}</code>\n\n" +
+                    "An administrator has been notified. Please wait for the 6-digit code — " +
+                    "it will be delivered to this chat when approved.\n\n" +
+                    "⏱ The code expires in 5 minutes.",
+                    ct, ParseMode.Html).ConfigureAwait(false);
+                return;
+            }
+
+            default:
+                await TrySend(chatId, "⚠️ Could not generate OTP right now. Please try again in a moment.", ct, ParseMode.Html).ConfigureAwait(false);
+                return;
+        }
+    }
+
+    private async Task NotifyAdminOfOtpAsync(long chatId, string requesterDisplayName, SearchSessionStore.OtpState otp, CancellationToken ct)
     {
         var adminChatIds = GetAdminChatIds();
         var adminUsernames = GetAdminUsernames();
@@ -165,8 +226,15 @@ public sealed class BotService
             new[] { InlineKeyboardButton.WithCallbackData("📨 Send OTP to client", $"sendotp:{chatId}") },
         });
 
+        // Include RequestId so admins can tell concurrent requests from different users apart.
+        var pendingCount = _sessions.GetPendingOtps().Count;
         var adminText =
-            $"[🔐] OTP request\n\nOTP: <code>{Escape(otpCode)}</code>\nName: {Escape(requesterDisplayName)}\nUser: {Escape(requesterDisplayName)}\nUser ID: <code>{chatId}</code>";
+            $"[🔐] OTP request <code>#{Escape(otp.RequestId)}</code>\n\n" +
+            $"OTP: <code>{Escape(otp.Code)}</code>\n" +
+            $"Name: {Escape(requesterDisplayName)}\n" +
+            $"User ID: <code>{chatId}</code>\n" +
+            $"Expires: {otp.ExpiresAtUtc:HH:mm:ss} UTC\n" +
+            (pendingCount > 1 ? $"\n📊 Currently {pendingCount} pending OTP request(s) in total." : "");
 
         var delivered = 0;
 
@@ -277,7 +345,8 @@ public sealed class BotService
     /// Handles the admin tapping "📨 Send OTP to client" on the admin
     /// notification -- looks up that client's current (still-live) OTP and
     /// messages it to them directly, so the admin never has to copy/paste it
-    /// by hand.
+    /// by hand. Records which admin approved the request and notifies the
+    /// other admins.
     /// </summary>
     private async Task HandleSendOtpToClientAsync(CallbackQuery cq, string data, CancellationToken ct)
     {
@@ -304,10 +373,38 @@ public sealed class BotService
             return;
         }
 
+        var approverDisplayName = FormatUserFromCallback(cq);
+        var approverUserId = cq.From.Id;
+
+        // Another admin may have already approved this request.
+        if (otp.DeliveredToClient)
+        {
+            var who = string.IsNullOrWhiteSpace(otp.ApprovedByDisplayName)
+                ? "another admin"
+                : otp.ApprovedByDisplayName;
+            await _bot.AnswerCallbackQuery(cq.Id,
+                $"Already approved by {who}.",
+                showAlert: true,
+                cancellationToken: ct).ConfigureAwait(false);
+
+            if (cq.Message is { } alreadyMsg)
+            {
+                try
+                {
+                    await _bot.EditMessageReplyMarkup(alreadyMsg.Chat.Id, alreadyMsg.Id,
+                        replyMarkup: null, cancellationToken: ct).ConfigureAwait(false);
+                }
+                catch { /* best effort */ }
+            }
+            return;
+        }
+
         try
         {
             await _bot.SendMessage(clientChatId,
-                $"🔐 Your verification code: <code>{Escape(otp.Code)}</code>\n\nSend <code>/verify {Escape(otp.Code)}</code> to continue.",
+                $"🔐 Your verification code: <code>{Escape(otp.Code)}</code>\n\n" +
+                $"Request ID: <code>#{Escape(otp.RequestId)}</code>\n\n" +
+                $"Send <code>/verify {Escape(otp.Code)}</code> to continue.",
                 parseMode: ParseMode.Html, cancellationToken: ct).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -317,21 +414,105 @@ public sealed class BotService
             return;
         }
 
+        if (!_sessions.MarkOtpDelivered(clientChatId, approverDisplayName, approverUserId))
+        {
+            // Race: another admin approved between our check and mark.
+            await _bot.AnswerCallbackQuery(cq.Id, "Already approved by another admin.", showAlert: true, cancellationToken: ct)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        // Refresh otp reference after mark (same object, but fields updated).
+        otp = clientSession.Otp!;
+
         await _bot.AnswerCallbackQuery(cq.Id, "OTP sent to client.", cancellationToken: ct).ConfigureAwait(false);
 
-        // Best effort: pull the button off the admin message once actioned.
+        var clientDisplayName = await GetRequesterDisplayNameAsync(clientChatId, ct).ConfigureAwait(false);
+        var approvedAt = otp.ApprovedAtUtc ?? DateTimeOffset.UtcNow;
+
+        var approvedNote =
+            $"[🔐] OTP request <code>#{Escape(otp.RequestId)}</code> — ✅ approved\n\n" +
+            $"OTP: <code>{Escape(otp.Code)}</code>\n" +
+            $"Client: {Escape(clientDisplayName)}\n" +
+            $"User ID: <code>{clientChatId}</code>\n\n" +
+            $"👤 Approved by: <b>{Escape(approverDisplayName)}</b>\n" +
+            $"Admin ID: <code>{approverUserId}</code>\n" +
+            $"Time: {approvedAt:yyyy-MM-dd HH:mm:ss} UTC";
+
+        // Update the message the approving admin tapped.
         if (cq.Message is { } adminMessage)
         {
             try
             {
-                await _bot.EditMessageReplyMarkup(adminMessage.Chat.Id, adminMessage.Id,
-                    replyMarkup: null, cancellationToken: ct).ConfigureAwait(false);
+                await _bot.EditMessageText(adminMessage.Chat.Id, adminMessage.Id,
+                    approvedNote,
+                    parseMode: ParseMode.Html,
+                    replyMarkup: null,
+                    cancellationToken: ct).ConfigureAwait(false);
             }
             catch
             {
-                // best effort
+                try
+                {
+                    await _bot.EditMessageReplyMarkup(adminMessage.Chat.Id, adminMessage.Id,
+                        replyMarkup: null, cancellationToken: ct).ConfigureAwait(false);
+                }
+                catch { /* best effort */ }
             }
         }
+
+        // Notify all other admins so everyone knows who approved.
+        await NotifyOtherAdminsOfOtpApprovalAsync(
+            approverUserId,
+            approvedNote,
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends the approval audit note to every configured admin except the one
+    /// who just approved (they already see the edited message).
+    /// </summary>
+    private async Task NotifyOtherAdminsOfOtpApprovalAsync(
+        long approverUserId,
+        string approvedNote,
+        CancellationToken ct)
+    {
+        foreach (var adminChatId in GetAdminChatIds())
+        {
+            if (adminChatId == approverUserId) continue;
+            try
+            {
+                await _bot.SendMessage(adminChatId, approvedNote, parseMode: ParseMode.Html, cancellationToken: ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not notify admin chat {adminChatId} of OTP approval: {ex.Message}");
+            }
+        }
+
+        foreach (var adminUsername in GetAdminUsernames())
+        {
+            try
+            {
+                // Username delivery can't reliably exclude the approver; still send.
+                // Duplicate is acceptable — the note is an audit record.
+                await _bot.SendMessage(adminUsername, approvedNote, parseMode: ParseMode.Html, cancellationToken: ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not notify admin username {adminUsername} of OTP approval: {ex.Message}");
+            }
+        }
+    }
+
+    private static string FormatUserFromCallback(CallbackQuery cq)
+    {
+        if (!string.IsNullOrWhiteSpace(cq.From.Username))
+            return "@" + cq.From.Username;
+        var name = string.Join(" ", new[] { cq.From.FirstName, cq.From.LastName }.Where(s => !string.IsNullOrWhiteSpace(s)));
+        return string.IsNullOrWhiteSpace(name) ? $"Admin-{cq.From.Id}" : name;
     }
 
     private async Task<string> GetRequesterDisplayNameAsync(long chatId, CancellationToken ct)
@@ -339,7 +520,7 @@ public sealed class BotService
         try
         {
             var chat = await _bot.GetChat(new ChatId(chatId), ct).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(chat.Username)) return chat.Username;
+            if (!string.IsNullOrWhiteSpace(chat.Username)) return "@" + chat.Username;
             var name = string.Join(" ", new[] { chat.FirstName, chat.LastName }.Where(s => !string.IsNullOrWhiteSpace(s)));
             return string.IsNullOrWhiteSpace(name) ? $"User-{chatId}" : name;
         }
@@ -357,7 +538,9 @@ public sealed class BotService
         }
 
         await TrySend(chatId,
-            "🔐 OTP verification required before any link can be opened. Tap the button below (or send <code>/requestotp</code>) to receive a code, then verify it with <code>/verify 123456</code>.",
+            "🔐 <b>OTP verification required</b> before any firmware link can be shown.\n\n" +
+            "Tap <b>🔐 Request OTP</b> below (or send <code>/requestotp</code>), " +
+            "wait for the code from an admin, then verify with <code>/verify 123456</code>.",
             ct, ParseMode.Html, BuildRequestOtpKeyboard()).ConfigureAwait(false);
         return false;
     }
@@ -489,11 +672,10 @@ public sealed class BotService
 
     /// <summary>
     /// Sends the FRBox share link + extraction code for the confirmed
-    /// firmware entry, then revokes the client's OTP verification. Policy:
-    /// one OTP = one download. If the client wants a different model or
-    /// version afterwards, EnsureOtpVerifiedAsync / the callback OTP gate
-    /// will force a fresh /requestotp + /verify before anything else
-    /// happens.
+    /// firmware entry, notifies admins of exactly what was delivered (so a
+    /// client cannot later claim they received a different model/version),
+    /// then revokes the client's OTP verification. Policy: one OTP = one
+    /// download.
     /// </summary>
     private async Task SendDownloadLinkAsync(long chatId, FirmwareEntry entry, CancellationToken ct)
     {
@@ -510,11 +692,84 @@ public sealed class BotService
             $"\n<i>Copy-paste format:</i>\n<code>{Escape(copyFormat)}</code>",
             parseMode: ParseMode.Html, cancellationToken: ct).ConfigureAwait(false);
 
+        // Notify admins of the exact firmware the client confirmed and received.
+        // This creates an audit trail so a client cannot later claim they got
+        // the wrong model or version. Include which admin approved the OTP if known.
+        var requesterDisplayName = await GetRequesterDisplayNameAsync(chatId, ct).ConfigureAwait(false);
+        var otp = _sessions.Get(chatId).Otp;
+        var approvedBy = otp is { DeliveredToClient: true } && !string.IsNullOrWhiteSpace(otp.ApprovedByDisplayName)
+            ? otp.ApprovedByDisplayName
+            : null;
+        await NotifyAdminOfFirmwareDownloadAsync(chatId, requesterDisplayName, entry, approvedBy, ct).ConfigureAwait(false);
+
         _sessions.ResetOtp(chatId);
 
         await TrySend(chatId,
-            "🔐 This OTP has now been used. To download a different model or version, send <code>/requestotp</code> again.",
-            ct, ParseMode.Html).ConfigureAwait(false);
+            "🔐 This OTP has now been used. To download a different model or version, tap <b>🔐 Request OTP</b> again (or send <code>/requestotp</code>).",
+            ct, ParseMode.Html, BuildRequestOtpKeyboard()).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Tells every configured admin exactly which firmware a client confirmed
+    /// and received. Used as proof if a client later claims they got the wrong
+    /// model/version.
+    /// </summary>
+    private async Task NotifyAdminOfFirmwareDownloadAsync(
+        long chatId,
+        string requesterDisplayName,
+        FirmwareEntry entry,
+        string? approvedByAdmin,
+        CancellationToken ct)
+    {
+        var adminChatIds = GetAdminChatIds();
+        var adminUsernames = GetAdminUsernames();
+
+        var when = DateTimeOffset.UtcNow;
+        var adminText =
+            $"[📥] Firmware delivered\n\n" +
+            $"User: {Escape(requesterDisplayName)}\n" +
+            $"User ID: <code>{chatId}</code>\n" +
+            $"Time: {when:yyyy-MM-dd HH:mm:ss} UTC\n" +
+            (string.IsNullOrWhiteSpace(approvedByAdmin)
+                ? ""
+                : $"👤 OTP approved by: <b>{Escape(approvedByAdmin)}</b>\n") +
+            "\n" +
+            $"📦 <b>{Escape(entry.Brand)} {Escape(entry.Project)}</b>\n" +
+            $"Version: <code>{Escape(entry.Version)}</code>\n" +
+            (string.IsNullOrWhiteSpace(entry.Platform) ? "" : $"Platform: {Escape(entry.Platform)}\n") +
+            $"Market: {Escape(entry.Market)}\n" +
+            $"Created: {Escape(entry.CreatedAt)}\n\n" +
+            $"🔗 Link: {Escape(entry.DownloadLink)}\n" +
+            (string.IsNullOrEmpty(entry.ExtractionCode)
+                ? ""
+                : $"🔑 Code: <code>{Escape(entry.ExtractionCode)}</code>\n") +
+            "\n<i>Client confirmed this exact entry before the link was sent.</i>";
+
+        foreach (var adminChatId in adminChatIds)
+        {
+            try
+            {
+                await _bot.SendMessage(adminChatId, adminText, parseMode: ParseMode.Html, cancellationToken: ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not notify admin chat {adminChatId} of firmware delivery: {ex.Message}");
+            }
+        }
+
+        foreach (var adminUsername in adminUsernames)
+        {
+            try
+            {
+                await _bot.SendMessage(adminUsername, adminText, parseMode: ParseMode.Html, cancellationToken: ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not notify admin username {adminUsername} of firmware delivery: {ex.Message}");
+            }
+        }
     }
 
     private static FirmwareEntry? GetEntry(SearchSessionStore.Session session, int index)
