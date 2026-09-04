@@ -193,6 +193,14 @@ public sealed class LocalCatalogService : IFirmwareCatalog
     /// <summary>Forces the next search to re-read the source (file or URL).</summary>
     public void InvalidateCache() => _cache = null;
 
+    /// <summary>Clear cache, reload from disk/URL, return entry count.</summary>
+    public async Task<int> ReloadAsync(CancellationToken ct = default)
+    {
+        InvalidateCache();
+        var all = await GetAllAsync(ct).ConfigureAwait(false);
+        return all.Count;
+    }
+
     public void Dispose()
     {
         _http?.Dispose();

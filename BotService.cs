@@ -37,7 +37,7 @@ public sealed class BotService
         {
             if (update.Message is { } message && message.Text is { } text)
             {
-                await HandleMessageAsync(message.Chat.Id, text, ct).ConfigureAwait(false);
+                await HandleMessageAsync(message, ct).ConfigureAwait(false);
             }
             else if (update.CallbackQuery is { } cq)
             {
@@ -62,9 +62,11 @@ public sealed class BotService
 
     // ---------------------------------------------------------------- text
 
-    private async Task HandleMessageAsync(long chatId, string text, CancellationToken ct)
+    private async Task HandleMessageAsync(Message message, CancellationToken ct)
     {
-        text = text.Trim();
+        var chatId = message.Chat.Id;
+        var text = (message.Text ?? "").Trim();
+        var from = message.From;
 
         if (text.StartsWith('/'))
         {
@@ -118,6 +120,17 @@ public sealed class BotService
                         return;
                     }
                     await RunSearchAsync(chatId, arg, page: 1, ct).ConfigureAwait(false);
+                    return;
+
+                // Admin-only: reload catalog from CATALOG_SOURCE / file (fresh share links)
+                case "/refreshcatalog":
+                case "/refresh":
+                    if (!IsUserAdmin(from?.Id, from?.Username))
+                    {
+                        await TrySend(chatId, "⛔ Admin only.", ct).ConfigureAwait(false);
+                        return;
+                    }
+                    await HandleRefreshCatalogAsync(chatId, arg, ct).ConfigureAwait(false);
                     return;
 
                 default:
@@ -330,15 +343,57 @@ public sealed class BotService
     /// </summary>
     private static bool IsCallerAdmin(CallbackQuery cq)
     {
-        if (GetAdminChatIds().Contains(cq.From.Id)) return true;
+        return IsUserAdmin(cq.From.Id, cq.From.Username);
+    }
 
-        if (!string.IsNullOrWhiteSpace(cq.From.Username) &&
-            GetAdminUsernames().Any(u => string.Equals(u, cq.From.Username, StringComparison.OrdinalIgnoreCase)))
+    /// <summary>Admin check for plain messages (chat commands).</summary>
+    private static bool IsUserAdmin(long? userId, string? username)
+    {
+        if (userId is long id && GetAdminChatIds().Contains(id))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(username) &&
+            GetAdminUsernames().Any(u => string.Equals(u, username, StringComparison.OrdinalIgnoreCase)))
         {
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Admin: reload firmware catalog from CATALOG_SOURCE (URL or file) so
+    /// clients get fresh FRBox share links after the Python scraper exports
+    /// a new JSON. Optional arg filters a search after reload to show the
+    /// updated entry quickly, e.g. <c>/refresh CN6</c>.
+    /// </summary>
+    private async Task HandleRefreshCatalogAsync(long chatId, string arg, CancellationToken ct)
+    {
+        await TrySend(chatId, "🔄 Reloading firmware catalog…", ct).ConfigureAwait(false);
+
+        try
+        {
+            var count = await _catalog.ReloadAsync(ct).ConfigureAwait(false);
+            await TrySend(chatId,
+                $"✅ Catalog refreshed.\n\n📦 Entries loaded: <b>{count}</b>\n\n" +
+                (string.IsNullOrWhiteSpace(arg)
+                    ? "Share links are now up to date. Clients can search again."
+                    : $"Searching for <code>{Escape(arg)}</code>…"),
+                ct, ParseMode.Html).ConfigureAwait(false);
+
+            // Optional: immediately re-search so admin can copy the new link for the client.
+            if (!string.IsNullOrWhiteSpace(arg))
+            {
+                await RunSearchAsync(chatId, arg, page: 1, ct).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            await TrySend(chatId,
+                $"❌ Catalog refresh failed:\n<code>{Escape(ex.Message)}</code>\n\n" +
+                "Check CATALOG_SOURCE (URL/file) and that the Python export JSON is reachable.",
+                ct, ParseMode.Html).ConfigureAwait(false);
+        }
     }
 
     /// <summary>

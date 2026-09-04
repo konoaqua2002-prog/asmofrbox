@@ -1,5 +1,4 @@
 {
-  "TELEGRAM_BOT_TOKEN": "123456:ABC-your-token-from-BotFather",
-  "ADMIN_TELEGRAM_CHAT_IDS": "1959847621,5741258354",
-  "CATALOG_SOURCE": ""
+  "CATALOG_SOURCE": "https://your-host.example/firmware_catalog_all.json",
+  "CATALOG_REFRESH_MINUTES": "60"
 }
